@@ -1,0 +1,230 @@
+---
+title: 使用 Go 实现 REST 服务器
+date: 2024-11-25
+lastmod: 2024-11-25
+tags: ['Go']
+draft: false
+summary:
+---
+
+这是一系列关于使用 Go 语言编写 REST 服务器的文章。在这个系列中，我计划使用几种不同的方法来实现一个简单的 REST 服务器，这样可以方便地比较和对比这些方法各自的优缺点。
+
+以下是本系列的文章列表：
+
+- 第一部分 - 标准库
+- 第二部分 - 使用路由包
+- 第三部分 - 使用 Web 框架
+- 第四部分 - 使用 OpenAPI 和 Swagger
+- 第五部分 - 中间件
+- 第六部分 - 身份认证
+- 第七部分 - GraphQL
+
+开发者在刚开始使用一门编程语言时，经常会问「我应该用什么框架来实现 X 功能」这样的问题。虽然这个问题在很多编程语言的 Web 应用和服务器开发中都很合理，但在 Go 语言中，答案并不是那么简单。关于是否使用框架，业界存在着截然不同的观点。我的目标是在这些文章中，从多个角度客观地探讨这个问题。
+
+## 任务说明
+
+首先，我假设读者已经知道什么是 REST 服务器 (REST server)。如果你需要复习这个概念，[这里有一个很好的参考资源](https://www.codecademy.com/articles/what-is-rest)，当然还有很多其他资源可供参考。本系列的后续内容假设你已经理解路径 (path)、HTTP 头 (HTTP header)、响应码 (response code) 等概念。
+
+在我们的例子中，我们将实现一个简单的任务管理应用后端（类似于 Google Keep、Todoist 这样的应用）；它为客户端提供以下 REST API：
+
+```
+POST   /tasks/              	  :  创建任务，返回 ID
+GET    /tasks/<taskid>      	  :  通过 ID 返回单个任务
+GET    /tasks/              	  :  返回所有任务
+DELETE /tasks/<taskid>      	  :  通过 ID 删除任务
+GET    /tasks//tag/<tagname>      :  返回具有此标签的任务列表
+GET    /tasks//due/<yy>/<mm>/<dd> :  返回在此日期之前到期的任务列表
+```
+
+我们的服务器支持 GET、POST 和 DELETE 请求，其中一些请求有多个可能的路径。尖括号 `<...>` 中的部分表示客户端作为请求的一部分提供的参数；例如，GET /task/42 是一个获取 ID 为 42 的任务的请求。每个任务都由唯一的 ID 标识。
+
+数据编码采用 JSON 格式。在 POST /task/ 请求中，客户端将发送要创建的任务的 JSON 表示。同样，在所有服务器"返回"数据的地方，返回的数据都会以 JSON 格式编码在 HTTP 响应的正文中。
+
+## 代码
+
+本文接下来将分部分展示服务器的 Go 代码。服务器的完整代码可以在[这里](https://github.com/eliben/code-for-blog/tree/main/2021/go-rest-servers/stdlib-basic)找到；这是一个独立的 Go 模块，没有任何依赖。克隆或复制项目目录后，无需安装任何东西就可以运行服务器：
+
+`$ SERVERPORT=4112 go run .`
+
+请注意，`SERVERPORT` 可以是任意端口；这是你本地服务器监听的 TCP 端口。服务器运行后，你可以在另一个终端中使用 curl 命令与其交互，或使用任何其他适合你的方式。你可以参考这个[示例脚本](https://github.com/eliben/code-for-blog/blob/main/2021/go-rest-servers/testing/manual.sh)；包含该脚本的目录中还有一个服务器的自动化测试程序。
+
+## Model
+
+让我们从讨论服务器的模型（或称「数据层」）开始 - taskstore 包（位于项目目录的 internal/taskstore 中）。这是一个表示 task 数据库的简单抽象；以下是它的 API：
+
+```go
+func New() *TaskStore
+
+// 在存储中创建新任务
+func (ts *TaskStore) CreateTask(text string, tags []string, due time.Time) int
+
+// 通过id从存储中获取任务。如果id不存在，则返回错误
+func (ts *TaskStore) GetTask(id int) (Task, error)
+
+// 删除具有给定id的任务。如果id不存在，则返回错误
+func (ts *TaskStore) DeleteTask(id int) error
+
+// 删除存储中的所有任务
+func (ts *TaskStore) DeleteAllTasks() error
+
+// 以任意顺序返回存储中的所有任务
+func (ts *TaskStore) GetAllTasks() []Task
+
+// 以任意顺序返回具有给定标签的所有任务
+func (ts *TaskStore) GetTasksByTag(tag string) []Task
+
+// 以任意顺序返回具有给定到期日期的所有任务
+func (ts *TaskStore) GetTasksByDueDate(year int, month time.Month, day int) []Task
+```
+
+Task 的类型是：
+
+```go
+type Task struct {
+  	Id   int       `json:"id"`
+  	Text string    `json:"text"`
+  	Tags []string  `json:"tags"`
+  	Due  time.Time `json:"due"`
+}
+```
+
+taskstore 包使用简单的 `map[int]Task` 来实现这个 API，不过你可以很容易地用数据库来实现它。在实际应用中，`TaskStore` 很可能会是一个接口 (interface)，可以由多个后端来实现，但对于我们这个简单的示例来说，目前的 API 已经足够了。如果你想要一个扩展练习，不妨尝试使用 MongoDB 之类的数据库来实现一个 `TaskStore`。
+
+## 设置服务器
+
+我们服务器的 main 函数相当简单：
+
+```go
+func main() {
+    mux := http.NewServeMux()
+    server := NewTaskServer()
+    mux.HandleFunc("POST /task/", server.createTaskHandler)
+    mux.HandleFunc("GET /task/", server.getAllTasksHandler)
+    mux.HandleFunc("DELETE /task/", server.deleteAllTasksHandler)
+    mux.HandleFunc("GET /task/{id}/", server.getTaskHandler)
+    mux.HandleFunc("DELETE /task/{id}/", server.deleteTaskHandler)
+    mux.HandleFunc("GET /tag/{tag}/", server.tagHandler)
+    mux.HandleFunc("GET /due/{year}/{month}/{day}/", server.dueHandler)
+
+    log.Fatal(http.ListenAndServe("localhost:"+os.Getenv("SERVERPORT"), mux))
+}
+```
+
+让我们先来讨论一下 NewTaskServer，稍后再回过头来讨论 router 和路径处理器（path handler）。
+
+NewTaskServer 是我们服务器类型 taskServer 的构造函数。该服务器封装了一个 TaskStore，它支持并发访问。
+
+```go
+type taskServer struct {
+    store *taskstore.TaskStore
+}
+
+func NewTaskServer() *taskServer {
+    store := taskstore.New()
+    return &taskServer{store: store}
+}
+```
+
+## 路由和处理器
+
+回到路由部分，使用 net/http 包中包含的标准 HTTP 多路复用器（multiplexer）：
+
+```go
+mux.HandleFunc("POST /task/", server.createTaskHandler)
+mux.HandleFunc("GET /task/", server.getAllTasksHandler)
+mux.HandleFunc("DELETE /task/", server.deleteAllTasksHandler)
+mux.HandleFunc("GET /task/{id}/", server.getTaskHandler)
+mux.HandleFunc("DELETE /task/{id}/", server.deleteTaskHandler)
+mux.HandleFunc("GET /tag/{tag}/", server.tagHandler)
+mux.HandleFunc("GET /due/{year}/{month}/{day}/", server.dueHandler)
+```
+
+标准多路复用器虽然简单，但对于大多数使用场景来说已经足够强大。
+
+让我们详细查看 getTaskHandler：
+
+```go
+func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request) {
+	log.Printf("handling get task at %s\n", req.URL.Path)
+
+	id, err := strconv.Atoi(req.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	task, err := ts.store.GetTask(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	js, err := json.Marshal(task)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+}
+```
+
+作为提醒，为多路复用器定义的路由是：
+
+```go
+mux.HandleFunc("GET /task/{id}/", server.getTaskHandler)
+```
+
+所以多路复用器已经为我们完成了一些工作：它匹配了 HTTP 方法 (只有 GET 请求会被路由到 getTaskHandler)，并且匹配了路径，包括 `{id}` 变量，这个变量可以通过请求的 PathValue 方法获取。
+
+这个处理器本身有两个主要任务：
+
+1. 从模型 (TaskStore) 获取数据
+2. 为客户端生成 HTTP 响应
+
+这两个任务都很直观，但如果你查看服务器中的其他处理器，你会发现第二个任务有点重复 - 序列化 JSON、写入正确的 HTTP 响应头等。我们稍后会回来讨论这个问题。
+
+其余的代码都是类似的，应该很容易理解。唯一特殊的处理器是 createTaskHandler，因为它需要解析客户端在请求体中发送的 JSON 数据。关于请求中的 JSON 解析还有一些细微之处我没有涉及 - 你可以查看[这篇文章](https://www.alexedwards.net/blog/how-to-properly-parse-a-json-request-body)了解更全面的方法。
+
+## 改进方案
+
+现在我们已经有了服务器的基础版本，是时候考虑潜在的问题和改进方案了。
+
+正如前面提到的，一个明显可以改进的地方是在 HTTP 响应中重复的 JSON 渲染。为此，我创建了一个称为 stdlib-factorjson 的服务器独立版本。我将它保持独立，以便你可以轻松地将它与原始服务器进行对比，看看发生了什么变化。它包含的主要创新是这个函数：
+
+```go
+// renderJSON renders 'v' as JSON and writes it as a response into w.
+func renderJSON(w http.ResponseWriter, v interface{}) {
+	js, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+}
+```
+
+使用它，我们可以重写所有处理程序使其更加简洁；例如，getTaskHandler 现在变成：
+
+```go
+func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request) {
+	log.Printf("handling get task at %s\n", req.URL.Path)
+
+	id, err := strconv.Atoi(req.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	task, err := ts.store.GetTask(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	renderJSON(w, task)
+}
+```
+
+在第二部分中，我们将讨论第三方路由包并将其与标准库进行比较。
