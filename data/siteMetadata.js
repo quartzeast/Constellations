@@ -2,9 +2,9 @@
 const siteMetadata = {
   title: 'Quartz',
   author: 'Quartzeast',
-  headerTitle: 'Quartz ',
-  description: 'Stay Hungry Stay Foolish',
-  language: 'en-us',
+  headerTitle: 'Quartz 🧑🏻‍💻',
+  description: '当你凝视深渊的时候，深渊也在凝视你',
+  language: 'zh-cn',
   theme: 'system', // system, dark or light
   siteUrl: 'https://nova-matrix.vercel.app',
   siteRepo: 'https://github.com/quartzeast/nova-matrix',
@@ -15,7 +15,7 @@ const siteMetadata = {
   twitter: 'https://twitter.com/quartzeast',
   youtube: 'https://www.youtube.com/channel/UC1QsbbxUfXU-SySr1z9Q0Ww',
   linkedin: 'https://www.linkedin.com/in/rocky-stone-7a3486246/',
-  locale: 'en-US',
+  locale: 'zh-CN',
   analytics: {
     // If you want to use an analytics provider you have to add it to the
     // content security policy in the `next.config.js` file.

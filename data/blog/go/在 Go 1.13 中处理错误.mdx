@@ -1,0 +1,106 @@
+---
+title: 在 Go 1.13 中处理错误
+date: 2024-12-17
+lastmod: 2024-12-17
+tags: ['Go']
+draft: false
+summary:
+---
+
+## 引言
+
+Go 语言将错误作为值 (errors as values) 的处理方式在过去十年中为我们提供了很好的服务。尽管标准库对错误的支持一直很简单 - 仅有 `errors.New` 和 `fmt.Errorf` 这两个函数，它们只能生成包含消息的错误 - 但内置的 `error` 接口允许 Go 程序员添加任何他们需要的信息。只需要实现一个 `Error` 方法即可。
+
+```go
+type QueryError struct {
+    Query string
+    Err   error
+}
+
+func (e *QueryError) Error() string { return e.Query + ": " + e.Err.Error() }
+```
+
+像这样的错误类型在 Go 代码中随处可见，它们存储的信息范围很广，从时间戳到文件名再到服务器地址。通常，这些信息还包括另一个较低层级的错误，以提供额外的上下文信息。
+
+一个错误包含另一个错误的模式在 Go 代码中如此普遍，以至于在经过深入讨论后，Go 1.13 专门为此添加了支持。本文将介绍标准库中为此提供支持的新增内容：`errors` 包中的三个新函数，以及 `fmt.Errorf` 的一个新格式化动词。
+
+在详细描述这些变化之前，让我们先回顾一下在之前的语言版本中是如何检查和构造错误的。
+
+## Go 1.13 之前的错误处理
+
+### 错误检查
+
+在 Go 语言中，错误是一种值 (value)。程序通过几种方式基于这些错误值做出决策。最常见的方式是将错误与 `nil` 进行比较，以判断操作是否失败。
+
+```go
+if err != nil {
+	// something went wrong
+}
+```
+
+有时我们会将错误与已知的哨兵值 (sentinel value) 进行比较，以检查是否发生了特定的错误。
+
+```go
+var ErrNotFound = errors.New("not found")
+
+if err == ErrNotFound {
+    // something wasn't found
+}
+```
+
+错误值可以是任何满足 `error` 接口的类型。程序可以使用类型断言或 type switch 来将错误值视为更具体的类型。
+
+```go
+type NotFoundError struct {
+    Name string
+}
+
+func (e *NotFoundError) Error() string { return e.Name + ": not found" }
+
+if e, ok := err.(*NotFoundError); ok {
+    // e.Name wasn't found
+}
+```
+
+### 添加错误信息
+
+函数在向上传递错误时，通常会为其添加额外信息，比如描述错误发生时正在进行的操作。最简单的方法是构造一个包含原始错误文本的新错误：
+
+```go
+if err != nil {
+    return fmt.Errorf("decompress %v: %v", name, err)
+}
+```
+
+使用 `fmt.Errorf` 创建新错误时，只会保留原始错误的文本信息，其他信息都会丢失。正如我们在前面 `QueryError` 的例子中看到的，有时我们可能需要定义一个新的错误类型来包含底层错误，以便代码可以检查这个错误。这里再次展示 `QueryError`：
+
+```go
+type QueryError struct {
+    Query string
+    Err   error
+}
+```
+
+程序可以查看 `*QueryError` 的内部来根据底层错误做出判断。这种操作通常被称为「解包」（unwrapping）错误。
+
+```go
+if e, ok := err.(*QueryError); ok && e.Err == ErrPermission {
+    // query failed because of a permission problem
+}
+```
+
+标准库中的 `os.PathError` 类型是另一个包含其他错误的错误类型示例。
+
+## Go 1.13 中的错误处理
+
+### Unwrap 方法
+
+Go 1.13 为 `errors` 和 `fmt` 标准库包引入了新特性，以简化包含其他错误的错误处理。其中最重要的是一个约定而非改动：一个包含其他错误的错误类型可以实现 `Unwrap` 方法来返回底层错误。如果 `e1.Unwrap()` 返回 `e2`，我们就说 `e1` 包装 (wrap) 了 `e2`，并且你可以解包 (unwrap) `e1` 来获得 `e2`。
+
+按照这个约定，我们可以为上面提到的 `QueryError` 类型添加一个返回其包含错误的 `Unwrap` 方法：
+
+```go
+func (e *QueryError) Unwrap() error { return e.Err }
+```
+
+解包得到的错误本身可能也有 `Unwrap` 方法；我们将通过重复解包产生的错误序列称为错误链 (error chain)。
